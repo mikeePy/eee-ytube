@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-YT701 - YouTube search + player + downloader.
+YT701 - YouTube search + URL loader + player + downloader.
 Player backends: mpv (JSON IPC) or VLC (HTTP interface).
 """
 
@@ -66,11 +66,27 @@ def save_config(cfg):
 CONFIG = load_config()
 
 def default_download_dir():
-    if IS_WINDOWS:
-        return os.path.join(os.path.expanduser("~"), "Downloads")
-    if IS_MAC:
-        return os.path.join(os.path.expanduser("~"), "Downloads")
     return os.path.join(os.path.expanduser("~"), "Downloads")
+
+# ---------- URL helpers ----------
+def is_youtube_url(text):
+    t = text.strip().lower()
+    if not t:
+        return False
+    if t.startswith("http://") or t.startswith("https://"):
+        return True
+    return ("youtube.com/" in t
+            or "youtu.be/" in t
+            or "youtube-nocookie.com/" in t
+            or "music.youtube.com/" in t)
+
+def is_playlist_url(text):
+    t = text.strip().lower()
+    # A pure playlist page contains "/playlist" in the path and a list= param.
+    if "/playlist" in t and "list=" in t:
+        return True
+    # /watch?v=ID&list=LIST_ID is treated as a single video.
+    return False
 
 # ---------- Discovery ----------
 def _exe(name):
@@ -510,7 +526,7 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("YT701")
-        root.geometry("840x500")
+        root.geometry("860x500")
         self.playlist = load_playlist()
         self.search_results = []
         self.player_var = tk.StringVar(value=CONFIG.get("player", "mpv"))
@@ -531,7 +547,10 @@ class App:
             f"yt-dlp:{'ok' if find_ytdlp_bin() else 'MISSING'}",
             f"ffmpeg:{'ok' if find_ffmpeg() else 'MISSING'}",
         ]
-        self.status.set("  |  ".join(parts))
+        self.status.set(
+            "  |  ".join(parts)
+            + "   —   paste a YouTube video or playlist URL to load it"
+        )
 
     def _build_ui(self):
         bar = ttk.Frame(self.root)
@@ -571,7 +590,7 @@ class App:
 
     def _build_search_tab(self, nb):
         tab = ttk.Frame(nb)
-        nb.add(tab, text="Search")
+        nb.add(tab, text="Search / Load")
 
         top = ttk.Frame(tab)
         top.pack(fill="x", padx=4, pady=4)
@@ -579,7 +598,8 @@ class App:
         entry = ttk.Entry(top, textvariable=self.query_var)
         entry.pack(side="left", fill="x", expand=True)
         entry.bind("<Return>", lambda e: self.do_search())
-        self.search_btn = ttk.Button(top, text="Search", command=self.do_search)
+        self.search_btn = ttk.Button(top, text="Search / Load",
+                                       command=self.do_search)
         self.search_btn.pack(side="left", padx=(4, 0))
 
         ttk.Label(top, text="Player:").pack(side="left", padx=(8, 2))
@@ -590,7 +610,8 @@ class App:
 
         lf = ttk.Frame(tab)
         lf.pack(fill="both", expand=True, padx=4)
-        self.results_list = tk.Listbox(lf, activestyle="none")
+        self.results_list = tk.Listbox(lf, activestyle="none",
+                                        selectmode="extended")
         self.results_list.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(lf, orient="vertical",
                             command=self.results_list.yview)
@@ -604,18 +625,21 @@ class App:
         ttk.Button(btns, text="Play",
                     command=self.play_selected_search).pack(side="left")
         ttk.Button(btns, text="Add to Playlist",
-                    command=self.add_search_to_playlist).pack(side="left", padx=(4, 0))
+                    command=self.add_search_to_playlist).pack(
+                        side="left", padx=(4, 0))
         ttk.Button(btns, text="Download",
-                    command=self.download_selected_search).pack(side="left", padx=(4, 0))
+                    command=self.download_selected_search).pack(
+                        side="left", padx=(4, 0))
         ttk.Button(btns, text="Show Formats",
                     command=self.show_formats).pack(side="left", padx=(4, 0))
 
     def _build_playlist_tab(self, nb):
         tab = ttk.Frame(nb)
-        nb.add(tab, text="Playlist")
+        nb.add(tab, text="My Playlist")
         lf = ttk.Frame(tab)
         lf.pack(fill="both", expand=True, padx=4, pady=4)
-        self.pl_list = tk.Listbox(lf, activestyle="none")
+        self.pl_list = tk.Listbox(lf, activestyle="none",
+                                   selectmode="extended")
         self.pl_list.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(lf, orient="vertical",
                             command=self.pl_list.yview)
@@ -628,9 +652,11 @@ class App:
         ttk.Button(btns, text="Play",
                     command=self.play_selected_playlist).pack(side="left")
         ttk.Button(btns, text="Download",
-                    command=self.download_selected_playlist).pack(side="left", padx=(4, 0))
-        ttk.Button(btns, text="Remove",
-                    command=self.remove_selected_playlist).pack(side="left", padx=(4, 0))
+                    command=self.download_selected_playlist).pack(
+                        side="left", padx=(4, 0))
+        ttk.Button(btns, text="Remove Selected",
+                    command=self.remove_selected_playlist).pack(
+                        side="left", padx=(4, 0))
 
     def _on_player_changed(self, event=None):
         CONFIG["player"] = self.player_var.get()
@@ -638,16 +664,27 @@ class App:
         self._stop_playback()
         self.status.set(f"Player: {self.player_var.get()}")
 
-    # ---------- Search ----------
+    # ---------- Search / Load entry point ----------
     def do_search(self):
         q = self.query_var.get().strip()
         if not q:
             return
         self.search_btn.config(state="disabled")
-        self.status.set(f"Searching: {q}")
         self.results_list.delete(0, "end")
-        threading.Thread(target=self._search_worker, args=(q,),
-                          daemon=True).start()
+
+        if is_youtube_url(q):
+            if is_playlist_url(q):
+                self.status.set("Loading playlist…")
+                threading.Thread(target=self._playlist_worker,
+                                  args=(q,), daemon=True).start()
+            else:
+                self.status.set("Loading video…")
+                threading.Thread(target=self._video_url_worker,
+                                  args=(q,), daemon=True).start()
+        else:
+            self.status.set(f"Searching: {q}")
+            threading.Thread(target=self._search_worker, args=(q,),
+                              daemon=True).start()
 
     def _search_worker(self, q):
         try:
@@ -668,7 +705,68 @@ class App:
             msg = str(ex)
             self.root.after(0, self._search_error, msg)
 
-    def _populate_results(self, results):
+    def _video_url_worker(self, url):
+        try:
+            with yt_dlp.YoutubeDL({
+                "quiet": True, "no_warnings": True,
+                "skip_download": True, "noplaylist": True,
+                "socket_timeout": 20,
+            }) as ydl:
+                info = ydl.extract_info(url, download=False)
+            # Some URLs return a playlist wrapper even with noplaylist;
+            # unwrap the first video if that happened.
+            if info and info.get("_type") == "playlist" and info.get("entries"):
+                entries = [e for e in info["entries"] if e]
+                if entries:
+                    info = entries[0]
+            if not info or not info.get("id"):
+                raise RuntimeError("No video info was returned")
+            result = {
+                "id": info["id"],
+                "title": info.get("title") or "(no title)",
+                "duration": info.get("duration"),
+                "uploader": info.get("uploader") or info.get("channel") or "",
+            }
+            self.root.after(0, self._populate_results, [result], "Video loaded")
+        except Exception as ex:
+            msg = str(ex)
+            self.root.after(0, self._search_error, msg)
+
+    def _playlist_worker(self, url):
+        try:
+            with yt_dlp.YoutubeDL({
+                "quiet": True, "no_warnings": True,
+                "skip_download": True, "socket_timeout": 30,
+                "extract_flat": True,
+                "noplaylist": False,
+            }) as ydl:
+                info = ydl.extract_info(url, download=False)
+            entries = (info.get("entries") or []) if info else []
+            results = []
+            for e in entries:
+                if not e:
+                    continue
+                vid = e.get("id")
+                if not vid or not isinstance(vid, str):
+                    continue
+                results.append({
+                    "id": vid,
+                    "title": e.get("title") or "(no title)",
+                    "duration": e.get("duration"),
+                    "uploader": (e.get("uploader")
+                                 or e.get("channel") or ""),
+                })
+            if not results:
+                raise RuntimeError("Playlist is empty or unavailable")
+            pl_title = (info.get("title") or "Playlist") if info else "Playlist"
+            self.root.after(
+                0, self._populate_results, results,
+                f"Playlist \u201c{pl_title}\u201d")
+        except Exception as ex:
+            msg = str(ex)
+            self.root.after(0, self._search_error, msg)
+
+    def _populate_results(self, results, label=None):
         self.search_results = results
         self.results_list.delete(0, "end")
         for r in results:
@@ -676,16 +774,22 @@ class App:
                 "end",
                 f"{r['title']}  [{fmt_duration(r['duration'])}]  — {r['uploader']}")
         self.search_btn.config(state="normal")
-        self.status.set(f"{len(results)} results")
+        if label:
+            self.status.set(f"{label}: {len(results)} videos")
+        else:
+            self.status.set(f"{len(results)} results")
 
     def _search_error(self, msg):
         self.search_btn.config(state="normal")
-        self.status.set("Search failed")
-        messagebox.showerror("Search failed", msg)
+        self.status.set("Load failed")
+        messagebox.showerror("Load failed", msg)
 
     def _selected_result(self):
         sel = self.results_list.curselection()
-        return self.search_results[sel[0]] if sel else None
+        if not sel:
+            return None
+        idx = sel[0]
+        return self.search_results[idx] if idx < len(self.search_results) else None
 
     def play_selected_search(self):
         r = self._selected_result()
@@ -693,16 +797,24 @@ class App:
             self._play(r)
 
     def add_search_to_playlist(self):
-        r = self._selected_result()
-        if not r:
+        sel = self.results_list.curselection()
+        if not sel:
             return
-        if any(x["id"] == r["id"] for x in self.playlist):
-            self.status.set("Already in playlist")
-            return
-        self.playlist.append(r)
-        save_playlist(self.playlist)
-        self._refresh_playlist()
-        self.status.set("Added to playlist")
+        added = 0
+        for idx in sel:
+            if idx >= len(self.search_results):
+                continue
+            r = self.search_results[idx]
+            if any(x["id"] == r["id"] for x in self.playlist):
+                continue
+            self.playlist.append(r)
+            added += 1
+        if added:
+            save_playlist(self.playlist)
+            self._refresh_playlist()
+            self.status.set(f"Added {added} video(s) to playlist")
+        else:
+            self.status.set("No new videos to add")
 
     def download_selected_search(self):
         r = self._selected_result()
@@ -757,7 +869,10 @@ class App:
 
     def _selected_playlist(self):
         sel = self.pl_list.curselection()
-        return self.playlist[sel[0]] if sel else None
+        if not sel:
+            return None
+        idx = sel[0]
+        return self.playlist[idx] if idx < len(self.playlist) else None
 
     def play_selected_playlist(self):
         r = self._selected_playlist()
@@ -770,12 +885,20 @@ class App:
             self._start_download(r)
 
     def remove_selected_playlist(self):
-        r = self._selected_playlist()
-        if not r:
+        sel = self.pl_list.curselection()
+        if not sel:
             return
-        self.playlist = [x for x in self.playlist if x["id"] != r["id"]]
+        ids_to_remove = set()
+        for idx in sel:
+            if idx < len(self.playlist):
+                ids_to_remove.add(self.playlist[idx]["id"])
+        if not ids_to_remove:
+            return
+        self.playlist = [x for x in self.playlist
+                          if x["id"] not in ids_to_remove]
         save_playlist(self.playlist)
         self._refresh_playlist()
+        self.status.set(f"Removed {len(ids_to_remove)} video(s)")
 
     # ---------- Download ----------
     def _start_download(self, rec):
@@ -812,7 +935,6 @@ class App:
 
         CONFIG["download_dir"] = target
         save_config(CONFIG)
-
         self.status.set(f"Downloading: {rec['title']}")
         threading.Thread(target=self._download_worker,
                           args=(rec, target), daemon=True).start()
